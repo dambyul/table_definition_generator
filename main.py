@@ -17,18 +17,26 @@ def read_settings_from_excel(settings_file):
         "port": ws["F14"].value,
         "user": ws["F15"].value,
         "password": ws["F16"].value,
-        "schemas": [s.strip() for s in ws["F17"].value.split(",")],
-        "main_color": ws["F21"].value,
-        "sub_color" : ws["F22"].value,
+        "schemas": [s.strip() for s in ws["F18"].value.split(",")],
+        "database": ws["F17"].value,
+        "main_color": ws["F22"].value,
+        "sub_color" : ws["F23"].value,
     }
 
     return db_config
 
 def create_excel_with_format(db_config, output_file, main_color, sub_color):
-    engine = create_engine(
-        f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}"
-    )
-
+    if db_config["system"].lower() == "mysql":
+        engine = create_engine(
+            f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}"
+        )
+    elif db_config["system"].lower() == "postgresql":
+        engine = create_engine(
+            f"postgresql+psycopg2://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}"
+        )
+    else:
+        raise ValueError(f"지원되지 않는 DB 시스템: {db_config['system']}")
+    
     wb = Workbook()
     default_sheet = wb.active
     default_sheet.title = "Default"
@@ -54,25 +62,48 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
     for schema_name in db_config["schemas"]:
         ws = wb.create_sheet(title=schema_name)
 
-        query = """
-            SELECT t.TABLE_SCHEMA AS `Database`,
-                   t.TABLE_NAME AS `Table`,
-                   t.TABLE_COMMENT AS `Table Comment`,
-                   c.COLUMN_NAME AS `Column`,
-                   c.ORDINAL_POSITION AS `No`,
-                   c.COLUMN_TYPE AS `Type & Length`,
-                   c.IS_NULLABLE AS `Not Null`,
-                   c.COLUMN_KEY AS `Key Type`,
-                   c.COLUMN_COMMENT AS `Comment`
-            FROM INFORMATION_SCHEMA.TABLES t
-                     JOIN
-                 INFORMATION_SCHEMA.COLUMNS c
-                 ON
-                     t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
-            WHERE t.TABLE_SCHEMA = %s
-            ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION;
-        """
-        df = pd.read_sql(query, engine, params=(schema_name,))
+        if db_config["system"].lower() == "mysql":
+            query = """
+                SELECT t.TABLE_SCHEMA AS "Database",
+                       t.TABLE_NAME AS "Table",
+                       t.TABLE_COMMENT AS "Table Comment",
+                       c.COLUMN_NAME AS "Column",
+                       c.ORDINAL_POSITION AS "No",
+                       c.COLUMN_TYPE AS "Type & Length",
+                       c.IS_NULLABLE AS "Not Null",
+                       c.COLUMN_KEY AS "Key Type",
+                       c.COLUMN_COMMENT AS "Comment"
+                FROM INFORMATION_SCHEMA.TABLES t
+                         JOIN INFORMATION_SCHEMA.COLUMNS c
+                         ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
+                WHERE t.TABLE_SCHEMA = %s
+                ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION;
+            """
+            df = pd.read_sql(query, engine, params=(schema_name,))
+        elif db_config["system"].lower() == "postgresql":
+            query = """
+                SELECT c.table_schema AS "Database",
+                       c.table_name AS "Table",
+                       obj_description(t.oid) AS "Table Comment",
+                       c.column_name AS "Column",
+                       c.ordinal_position AS "No",
+                       c.data_type || 
+                       COALESCE('(' || character_maximum_length || ')', '') AS "Type & Length",
+                       c.is_nullable AS "Not Null",
+                       CASE
+                           WHEN p.contype = 'p' THEN 'PRI'
+                           WHEN p.contype = 'u' THEN 'UNI'
+                           ELSE ''
+                       END AS "Key Type",
+                       col_description(t.oid, c.ordinal_position) AS "Comment"
+                FROM information_schema.columns c
+                         JOIN pg_class t ON t.relname = c.table_name
+                         JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = c.table_schema
+                         LEFT JOIN pg_constraint p ON p.conrelid = t.oid AND c.ordinal_position = ANY (p.conkey)
+                WHERE c.table_schema = %s
+                ORDER BY c.table_name, c.ordinal_position;
+            """
+            df = pd.read_sql(query, engine, params=(schema_name,))
 
         row_num = 1
         for table_name, group in df.groupby("Table"):
@@ -121,7 +152,7 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
             row_num += 3
 
             column_headers = [
-                "컬럼명", "No", "컬럼 ID", "타입 및 길이", "Not Null", "PK", "IDX", "비고"
+                "No", "컬럼명", "컬럼 ID", "타입 및 길이", "Not Null", "PK", "IDX", "비고"
             ]
             for col_num, header in enumerate(column_headers, start=1):
                 cell = ws.cell(row=row_num, column=col_num, value=header)
@@ -141,13 +172,13 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
 
             for _, row in group.iterrows():
                 top_border = thick_border.top if is_first_row else border_style.top
-                ws.cell(row=row_num, column=1, value=row["Comment"]).border = Border(
+                ws.cell(row=row_num, column=1, value=row["No"]).border = Border(
                     top=top_border,
                     left=border_style.left,
                     right=border_style.right,
                     bottom=border_style.bottom,
                 )
-                ws.cell(row=row_num, column=2, value=row["No"]).border = Border(
+                ws.cell(row=row_num, column=2, value=row["Comment"]).border = Border(
                     top=top_border,
                     left=border_style.left,
                     right=border_style.right,
@@ -236,4 +267,4 @@ output_file = "table_definitions.xlsx"
 db_config = read_settings_from_excel(settings_file)
 create_excel_with_format(db_config, output_file, db_config["main_color"], db_config["sub_color"])
 
-print("출력 완료료")
+print("출력 완료")
