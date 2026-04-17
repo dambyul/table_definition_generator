@@ -4,6 +4,7 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 from datetime import datetime
+import json
 
 current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -24,6 +25,11 @@ def read_settings_from_excel(settings_file):
     }
 
     return db_config
+
+def read_settings_from_json(settings_file):
+    with open(settings_file, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    return config
 
 def create_excel_with_format(db_config, output_file, main_color, sub_color):
     if db_config["system"].lower() == "mysql":
@@ -59,8 +65,24 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
     header_fill = PatternFill(start_color=main_color, end_color=main_color, fill_type="solid")
     subheader_fill = PatternFill(start_color=sub_color, end_color=sub_color, fill_type="solid")
 
-    for schema_name in db_config["schemas"]:
-        ws = wb.create_sheet(title=schema_name)
+    raw_schemas = db_config["schemas"]
+    schemas_dict = {}
+    if isinstance(raw_schemas, dict):
+        for tab_name, schema_list in raw_schemas.items():
+            schemas_dict[tab_name] = schema_list if isinstance(schema_list, list) else [schema_list]
+    elif isinstance(raw_schemas, list):
+        for item in raw_schemas:
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    schemas_dict[k] = v if isinstance(v, list) else [v]
+            else:
+                schemas_dict[item] = [item]
+
+    for tab_title, schema_list in schemas_dict.items():
+        ws = wb.create_sheet(title=str(tab_title)[:31])
+
+        dfs = []
+        for schema_name in schema_list:
 
         if db_config["system"].lower() == "mysql":
             query = """
@@ -77,9 +99,10 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
                          JOIN INFORMATION_SCHEMA.COLUMNS c
                          ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME
                 WHERE t.TABLE_SCHEMA = %s
-                ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION;
+                ORDER BY t.TABLE_SCHEMA, t.TABLE_NAME, c.ORDINAL_POSITION;
             """
-            df = pd.read_sql(query, engine, params=(schema_name,))
+            df_temp = pd.read_sql(query, engine, params=(schema_name,))
+            dfs.append(df_temp)
         elif db_config["system"].lower() == "postgresql":
             query = """
                 SELECT c.table_schema AS "Database",
@@ -101,12 +124,19 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
                          JOIN pg_namespace n ON n.oid = t.relnamespace AND n.nspname = c.table_schema
                          LEFT JOIN pg_constraint p ON p.conrelid = t.oid AND c.ordinal_position = ANY (p.conkey)
                 WHERE c.table_schema = %s
-                ORDER BY c.table_name, c.ordinal_position;
+                ORDER BY c.table_schema, c.table_name, c.ordinal_position;
             """
-            df = pd.read_sql(query, engine, params=(schema_name,))
+            df_temp = pd.read_sql(query, engine, params=(schema_name,))
+            dfs.append(df_temp)
+
+        if not dfs:
+            continue
+        df = pd.concat(dfs, ignore_index=True)
+        if df.empty:
+            continue
 
         row_num = 1
-        for table_name, group in df.groupby("Table"):
+        for (actual_schema, table_name), group in df.groupby(["Database", "Table"]):
             first_row = row_num
 
             ws.merge_cells(start_row=row_num, start_column=2, end_row=row_num, end_column=4)
@@ -114,7 +144,7 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
             ws.cell(row=row_num, column=1).alignment = header_alignment
             ws.cell(row=row_num, column=1).font = header_font
             ws.cell(row=row_num, column=1).fill = header_fill
-            ws.cell(row=row_num, column=2).value = schema_name
+            ws.cell(row=row_num, column=2).value = actual_schema
 
             ws.merge_cells(start_row=row_num, start_column=6, end_row=row_num, end_column=8)
             ws.cell(row=row_num, column=5).value = "테이블 명"
@@ -259,12 +289,13 @@ def create_excel_with_format(db_config, output_file, main_color, sub_color):
 
     wb.save(output_file)
 
-settings_file = "settings.xlsx"
+settings_file = "settings.json"
+#settings_file = "settings.xlsx"
 #settings_file = "test/settings.xlsx"
 
 output_file = "table_definitions.xlsx"
 
-db_config = read_settings_from_excel(settings_file)
+db_config = read_settings_from_json(settings_file)
 create_excel_with_format(db_config, output_file, db_config["main_color"], db_config["sub_color"])
 
 print("출력 완료")

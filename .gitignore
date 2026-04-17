@@ -1,3 +1,5 @@
 .venv
 test
 table_definitions.xlsx
+settings.json
+settings.xlsx

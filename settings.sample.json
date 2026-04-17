@@ -1,0 +1,15 @@
+{
+  "system": "PostgreSQL",
+  "host": "localhost",
+  "port": 15432,
+  "user": "your_username",
+  "password": "your_password",
+  "schemas": {
+    "tab_group_1": ["schema_1", "schema_2"],
+    "tab_group_2": ["schema_3"],
+    "tab_single": "schema_4"
+  },
+  "database": "postgres",
+  "main_color": "e69797",
+  "sub_color": "e69797"
+}
